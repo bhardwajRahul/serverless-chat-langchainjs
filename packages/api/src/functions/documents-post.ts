@@ -48,9 +48,14 @@ export async function postDocuments(request: HttpRequest, context: InvocationCon
       const credentials = getCredentials();
       const azureADTokenProvider = getAzureOpenAiTokenProvider();
 
-      // Initialize embeddings model and vector database
       const embeddings = new AzureOpenAIEmbeddings({ azureADTokenProvider });
-      await AzureCosmosDBNoSQLVectorStore.fromDocuments(documents, embeddings, { credentials });
+      const store = new AzureCosmosDBNoSQLVectorStore(embeddings, { credentials });
+
+      // Delete existing chunks with the same filename before inserting
+      await store.delete({ filter: `SELECT c.id FROM c WHERE c.metadata.source = "${filename}"` });
+      context.log(`Deleted existing chunks for "${filename}" from CosmosDB`);
+
+      await store.addDocuments(documents);
     } else {
       // If no environment variables are set, it means we are running locally
       context.log('No Azure OpenAI endpoint set, using Ollama models and local DB');
@@ -58,6 +63,21 @@ export async function postDocuments(request: HttpRequest, context: InvocationCon
       const folderExists = await checkFolderExists(faissStoreFolder);
       if (folderExists) {
         const store = await FaissStore.load(faissStoreFolder, embeddings);
+
+        // Delete existing chunks with the same filename before inserting
+        const docstore = (store as any).docstore._docs as Map<string, any>;
+        const idsToDelete = [];
+        for (const [id, document] of docstore.entries()) {
+          if (document.metadata?.source === filename) {
+            idsToDelete.push(id);
+          }
+        }
+
+        if (idsToDelete.length > 0) {
+          await store.delete({ ids: idsToDelete });
+          context.log(`Deleted ${idsToDelete.length} existing chunks for "${filename}"`);
+        }
+
         await store.addDocuments(documents);
         await store.save(faissStoreFolder);
       } else {
